@@ -1,7 +1,8 @@
-#include <raylib.h>
 #include <random>
 #include <stdlib.h>
 #include <cstdio>
+#include <raylib.h>
+#include <fstream>
 
 struct SimObject
 {
@@ -18,13 +19,16 @@ struct Node : SimObject
 {
     Node(){}
 
-    Node(int x, int y, int id)
-        : x{ x }, 
-          y{ y }, 
-          id{ id }
+    Node(int x, int y, int id, std::ofstream* data_file)
+        : x{ x },
+          y{ y },
+          id{ id },
+          data_file{ data_file }
+
     {
         left = nullptr;
         right = nullptr;
+        active = true;
         alert = false;
         alert_old = false;
         warning = false;
@@ -59,6 +63,7 @@ struct Node : SimObject
     void Update() override
     {
         move();
+        failure();
     }
 
     void move() 
@@ -80,20 +85,38 @@ struct Node : SimObject
         }
     }
 
-    void receive_water(bool contaminated)
+    void receive_water(bool contaminated, int step)
     {
-        send_water(alert_old);
+        send_water(alert_old, step);
         if(contaminated) alert_children(contaminated);
         if(!contaminated) contaminated = generate_water_quality();
         color = contaminated ? RED : DARKBLUE;
+        color = active ? color : ColorAlpha(DARKBLUE, 0.5f);
         alert_old = contaminated;
+
+        int left_child = left ? left->id : 999;
+        int right_child = right ? right->id : 999;
+
+        (*data_file) <<  step << "," << id << "," << left_child << "," << right_child << "," << alert << "," << contaminated << "," << active << std::endl;
     }
 
     void alert_children(bool alert_received)
     {
         color_alert = alert_received ? YELLOW : GREEN;
-        if(left) left->alert_children(alert_received);
-        if(right) right->alert_children(alert_received);
+        color_alert = active ? color_alert : BLANK;
+        if(active)
+        {
+            if(left) left->alert_children(alert_received);
+            if(right) right->alert_children(alert_received);
+        }
+    }
+
+    void failure(float prob = 0.001f)
+    {
+        prob = active ? prob : 0.99; 
+        std::random_device dev;
+        std::uniform_real_distribution<double> runif(0.0, 1.0);
+        active = runif(dev) < prob ? false : true;
     }
     
     void reset_alerts()
@@ -101,18 +124,18 @@ struct Node : SimObject
         color_alert = GREEN;
     }
 
-    void send_water()
+    void send_water(int step)
     {
-        receive_water(
-            generate_water_quality()
+        receive_water(  
+            generate_water_quality(), step
         );
     }
 
-    void send_water(bool contaminated)
+    void send_water(bool contaminated, int step)
     {
         reset_alerts();
-        if(left) left->receive_water(contaminated);
-        if(right) right->receive_water(contaminated);
+        if(left) left->receive_water(contaminated, step);
+        if(right) right->receive_water(contaminated, step);
     }
 
     bool generate_water_quality(float prob = 0.01f)
@@ -121,9 +144,8 @@ struct Node : SimObject
         std::uniform_real_distribution<double> runif(0.0, 1.0);
         
         if(runif(dev) < prob)
-        {
             return true;
-        }
+            
         return false;
     }
 
@@ -132,17 +154,21 @@ struct Node : SimObject
     int id;
     Node* left;
     Node* right;
+    bool active;
     bool alert;
     bool alert_old;
     bool warning;
     bool dragging;
     Color color;
     Color color_alert;
+    std::ofstream* data_file;
 };
 
 struct Master
 {
-    Master() : last_id{ 1 } {}
+    Master(std::ofstream* data_file) 
+        : last_id{ 1 },
+          data_file { data_file } {}
 
     void update_tree(Node* root)
     {
@@ -163,7 +189,7 @@ struct Master
         Node* parent = search_by_id(root, parent_id);
         if(parent)
         {
-            Node* new_node = new Node{ parent->x, parent->y + 75, ++last_id };
+            Node* new_node = new Node{ parent->x, parent->y + 75, ++last_id, data_file};
             if(parent->left)
             {
                 new_node->x += 75;
@@ -193,15 +219,23 @@ struct Master
     }
 
     int last_id;
+    std::ofstream* data_file;
 };
 
 const int SCREEN_WIDTH = 800;
 const int SCREEN_HEIGHT = 600;
 
+
 int main()
 {   
-    Master master{};
-    Node n{ 400, 100, 1};
+
+    std::ofstream csv_file;
+    csv_file.open("./data/data.csv");
+
+    csv_file << "step,id,left_child,right_child,warning,contaminated,active" << std::endl;
+
+    Master master{ &csv_file };
+    Node n{ 400, 100, 1, &csv_file };
 
     char name[5 + 1] = "\0";
     int letterCount = 0;
@@ -213,6 +247,8 @@ int main()
     int new_id;
 
     int step{ 1 };
+
+    int speed{ 60 };
 
     bool pause = false;
 
@@ -228,9 +264,9 @@ int main()
         {
             SetMouseCursor(MOUSE_CURSOR_IBEAM);
             int key = GetCharPressed();
-            while (key > 0)
+            while(key > 0)
             {
-                if ((key >= 48) && (key <= 57) && (letterCount < 5))
+                if((key >= 48) && (key <= 57) && (letterCount < 5))
                 {
                     name[letterCount] = (char) key;
                     name[letterCount + 1] = '\0';
@@ -240,10 +276,10 @@ int main()
                 key = GetCharPressed(); 
             }
 
-            if (IsKeyPressed(KEY_BACKSPACE))
+            if(IsKeyPressed(KEY_BACKSPACE))
             {
                 letterCount--;
-                if (letterCount < 0) letterCount = 0;
+                if(letterCount < 0) letterCount = 0;
                 name[letterCount] = '\0';
             }
         }
@@ -257,32 +293,38 @@ int main()
             name[letterCount] = '\0';
         }
         
-        
         if(IsKeyPressed(KEY_P)) pause = !pause;
         {
-            if((framesCounter % (60 * 1) == 0) || (IsKeyPressed(KEY_SPACE) && pause))
+            if((framesCounter % (speed * 1) == 0) || (IsKeyPressed(KEY_SPACE) && pause))
             {
                 printf("Step %d\n", step++);
-                n.send_water();
+                n.send_water(step);
             }
         }
+
+        if(IsKeyDown(KEY_KP_SUBTRACT))
+            speed = (speed - 1) < 1 ? 1 : speed - 1;
+
+        if(IsKeyDown(KEY_KP_ADD))
+            speed++;
 
         master.update_tree(&n);
         
         BeginDrawing();
             ClearBackground(RAYWHITE);
 
-            if (mouseOnText) DrawRectangleLines((int) textBox.x, (int) textBox.y, (int) textBox.width, (int) textBox.height, RED);
+            if(mouseOnText) DrawRectangleLines((int) textBox.x, (int) textBox.y, (int) textBox.width, (int) textBox.height, RED);
             else DrawRectangleLines((int) textBox.x, (int) textBox.y, (int) textBox.width, (int) textBox.height, DARKGRAY);
 
             DrawText(name, (int) textBox.x + 5, (int) textBox.y + 8, 18, MAROON);
             DrawText("Digite o ID do nó pai.", 75, 75, 16, DARKGRAY);
+            DrawText(TextFormat("Speed %d", speed), 10, 10, 12, BLACK);
 
-            if (mouseOnText)
+            if(mouseOnText)
             {
-                if (letterCount < 5)
+                if(letterCount < 5)
                 {
-                    if (((framesCounter / 20) % 2) == 0) DrawText("_", (int) textBox.x + 8 + MeasureText(name, 12), (int) textBox.y + 12, 16, MAROON);
+                    if(((framesCounter / 20) % 2) == 0) DrawText("_", (int) textBox.x + 8 + MeasureText(name, 12), (int) textBox.y + 12, 16, MAROON);
                     DrawText("Aperte ENTER para criar um novo nó.", 30, 150, 14, GRAY);
                 }
             }
@@ -302,6 +344,8 @@ int main()
 
         if(!pause) framesCounter++;
     }
+
+    csv_file.close();
 
     return 0;
 }
